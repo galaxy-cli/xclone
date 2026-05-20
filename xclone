@@ -1,0 +1,164 @@
+#!/bin/bash
+#             _                  
+#   __  _____| | ___  _ __   ___ 
+#   \ \/ / __| |/ _ \| '_ \ / _ \
+#    >  < (__| | (_) | | | |  __/
+#   /_/\_\___|_|\___/|_| |_|\___|
+#                                
+# xclone - A high-utility multi-remote wrapper for native rclone operations.
+#
+# Project: https://github.com/galaxy-cli/xclone
+
+PROGRAM_NAME="${0##*/}"
+VERSION="2.5.0"
+
+# --- SYSTEM DEPENDENCY RUNTIME CHECK ---
+if ! command -v rclone &>/dev/null; then
+    echo "[-] Error: 'rclone' command not found." >&2
+    echo "[*] Please install it via your package manager: sudo apt install rclone" >&2
+    exit 1
+fi
+
+# --- USAGE HELPER ---
+usage() {
+    cat << EOF
+======================================================================
+ xclone v${VERSION} - Multi-Remote Rclone Wrapper
+======================================================================
+Usage: ${PROGRAM_NAME} [OPTIONS] ACTION REMOTES [PATH1] [PATH2]
+       ${PROGRAM_NAME} listremotes | config
+
+Options:
+  -n, --dry-run     Simulate command execution without changing files
+  -v, --verbose     Print underlying live rclone system calls
+  -h, --help        Show this reference screen
+
+Actions:
+  Dual-Path         sync, copy, move, check
+  Single-Path       lsf, ls, size, mkdir, purge, deletefile
+
+Examples:
+  ${PROGRAM_NAME} config
+  ${PROGRAM_NAME} lsf mega
+  ${PROGRAM_NAME} copy gdrive,dropbox ~/Documents Backup
+======================================================================
+EOF
+}
+
+# --- INITIALIZE VARIABLES ---
+DRY_RUN=false
+VERBOSE=false
+PARAMS=()
+
+# --- ARGUMENT PARSING ---
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n|--dry-run) DRY_RUN=true; shift ;;
+        -v|--verbose) VERBOSE=true; shift ;;
+        -h|--help)    usage; exit 0 ;;
+        -*)
+            echo "[-] Error: Unrecognized option '$1'" >&2
+            echo "[*] Try '${PROGRAM_NAME} --help' for more information" >&2
+            exit 1
+            ;;
+        *)
+            PARAMS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# --- INTERCEPT GLOBAL SYSTEM ACTIONS ---
+ACTION="${PARAMS[0]}"
+
+if [[ "$ACTION" == "config" ]]; then
+    echo "[+] Launching interactive rclone config utility..."
+    echo "----------------------------------------"
+    rclone config
+    exit 0
+elif [[ "$ACTION" == "listremotes" || "$ACTION" == "remotes" ]]; then
+    echo "[+] Fetching configured rclone profiles..."
+    echo "----------------------------------------"
+    rclone listremotes
+    echo "----------------------------------------"
+    exit 0
+fi
+
+# --- OPERATIONAL PARAMETER VALIDATION CONTROLS ---
+if (( ${#PARAMS[@]} < 2 )); then
+    echo "[-] Error: Missing required parameters." >&2
+    echo "[*] Try '${PROGRAM_NAME} --help' for more information" >&2
+    exit 1
+fi
+
+IFS=',' read -ra SELECTED_REMOTES <<< "${PARAMS[1]}"
+PATH1="${PARAMS[2]}"
+PATH2="${PARAMS[3]}"
+
+# --- AUTO-CORRECT EMPTY PATHS ---
+if [[ -z "$PATH1" ]]; then
+    if [[ "$ACTION" == "ls" || "$ACTION" == "lsf" || "$ACTION" == "size" || "$ACTION" == "mkdir" ]]; then
+        PATH1="/"
+    fi
+fi
+
+# --- DETERMINE COMMAND TYPE AND VALIDATE ---
+case "$ACTION" in
+    sync|copy|move|check)
+        IS_DUAL_PATH=true
+        if [[ -z "$PATH1" || -z "$PATH2" ]]; then
+            echo "[-] Error: Action '${ACTION}' requires both a Source and Destination path." >&2
+            exit 1
+        fi
+        if [[ ! "$PATH1" == *":"* && ! -e "$PATH1" ]]; then
+            echo "[-] Error: Local source path '${PATH1}' does not exist." >&2
+            exit 1
+        fi
+        ;;
+    ls|lsf|size|mkdir|purge|deletefile)
+        IS_DUAL_PATH=false
+        ;;
+    *)
+        echo "[-] Error: Unsupported action '${ACTION}'." >&2
+        exit 1
+        ;;
+esac
+
+# --- CORE BACKEND EXECUTION RUNTIME ---
+configured_remotes=$(rclone listremotes 2>/dev/null)
+trap 'echo -e "\n[-] Process execution aborted by user."; exit 130' SIGINT SIGTERM
+
+for remote in "${SELECTED_REMOTES[@]}"; do
+    remote=$(echo "$remote" | xargs)
+    [[ -z "$remote" ]] && continue
+
+    if [[ ! "$configured_remotes" =~ (^|$'\n')"${remote}": ]]; then
+        echo "[WARN] Remote connection '${remote}' not found in rclone config. Skipping." >&2
+        continue
+    fi
+
+    RCLONE_ARGS=("$ACTION")
+    [[ "$DRY_RUN" == true ]] && RCLONE_ARGS+=("--dry-run")
+    
+    if [ "$IS_DUAL_PATH" = true ]; then
+        echo "[+] Processing [${remote}]: '${PATH1}' -> '${remote}:${PATH2}'"
+        if [[ "$ACTION" == "sync" || "$ACTION" == "copy" || "$ACTION" == "move" ]]; then
+            RCLONE_ARGS+=("$PATH1" "${remote}:${PATH2}" "--progress")
+        else
+            RCLONE_ARGS+=("$PATH1" "${remote}:${PATH2}")
+        fi
+    else
+        echo "[+] Querying [${remote}] at target path: '${PATH1}'"
+        RCLONE_ARGS+=("${remote}:${PATH1}")
+    fi
+
+    if [[ "$VERBOSE" == true || "$DRY_RUN" == true ]]; then
+        echo "    [COMMAND] rclone ${RCLONE_ARGS[*]}" >&2
+    fi
+
+    rclone "${RCLONE_ARGS[@]}"
+    echo "[+] Completed [${remote}]"
+    echo "----------------------------------------"
+done
+
+echo "[*] All tasks complete."
